@@ -279,6 +279,14 @@ m_HostileRefManager(this), m_AutoRepeatFirstCast(false)
     _lastLiquid = NULL;
 
     _oldFactionId = 0;
+
+	for (uint8 i = BASE_ATTACK; i < RANGED_ATTACK; ++i)
+		 {
+		_damageInfo[i].target = NULL;
+		_delayedTargetGuid[i] = 0;
+		_swingDelayTimer[i] = 0;
+		_swingLanded[i] = true;
+	}
 }
 
 ////////////////////////////////////////////////////////////
@@ -404,6 +412,21 @@ void Unit::Update(uint32 p_time)
         }
     }
 
+	for (uint8 i = BASE_ATTACK; i < RANGED_ATTACK; ++i)
+		 {
+		if (_delayedTargetGuid[i])
+			 {
+				 if (_swingLanded[i])
+				_delayedTargetGuid[i] = 0;
+			else if (_swingDelayTimer[i] >= p_time)
+				 _swingDelayTimer[i] -= p_time;
+			else
+				 ExecuteDelayedSwingHit(WeaponAttackType(i));
+			
+		}
+		
+	}
+
     // not implemented before 3.0.2
 	// xinef: if attack time > 0, reduce by diff
 	// if on next update, attack time < 0 assume player didnt attack - set to 0
@@ -426,6 +449,40 @@ void Unit::Update(uint32 p_time)
 
     UpdateSplineMovement(p_time);
     GetMotionMaster()->UpdateMotion(p_time);
+}
+
+void Unit::ExecuteDelayedSwingHit(WeaponAttackType attType, bool extra)
+{
+	if (_swingLanded[attType])
+		return;
+
+	_swingLanded[attType] = true;
+
+	//if there is extra attack proc then target is already defined
+	if (!extra)
+		_damageInfo[attType].target = ObjectAccessor::FindUnit(_delayedTargetGuid[attType]);
+
+	if (!_damageInfo[attType].target)
+		return;
+
+	// TC_LOG_DEBUG("entities.unit", "Unit::ExecuteDelayedSwingHit() call for %s, victim = %s", GetName().c_str(), _damageInfo[attType].target->GetName().c_str());
+
+	//TriggerAurasProcOnEvent(*_damageInfo);
+	ProcDamageAndSpell(_damageInfo[attType].target, _damageInfo[attType].procAttacker, _damageInfo[attType].procVictim,
+		_damageInfo[attType].procEx, _damageInfo[attType].damage, _damageInfo[attType].attackType);
+	DealMeleeDamage(&_damageInfo[attType], true);
+}
+
+void Unit::SuspendDelayedSwing(WeaponAttackType attType)
+{
+	ASSERT(attType < RANGED_ATTACK);
+
+	if (_swingLanded[attType])
+		return;
+
+	_swingLanded[attType] = true;
+
+	// TC_LOG_DEBUG("entities.unit", "Unit::SuspendDelayedSwing() call for %s", GetName().c_str());
 }
 
 bool Unit::haveOffhandWeapon() const
@@ -2132,6 +2189,9 @@ void Unit::AttackerStateUpdate (Unit* victim, WeaponAttackType attType, bool ext
     if (attType != BASE_ATTACK && attType != OFF_ATTACK)
         return;                                             // ignore ranged case
 
+	// Attempt to finish previous attack
+	ExecuteDelayedSwingHit(attType);
+
     // melee attack spell casted at main hand attack only - no normal melee dmg dealt
     if (attType == BASE_ATTACK && m_currentSpells[CURRENT_MELEE_SPELL] && !extra)
 		m_currentSpells[CURRENT_MELEE_SPELL]->cast();
@@ -2140,16 +2200,22 @@ void Unit::AttackerStateUpdate (Unit* victim, WeaponAttackType attType, bool ext
         // attack can be redirected to another target
         victim = GetMeleeHitRedirectTarget(victim);
 
-        CalcDamageInfo damageInfo;
-        CalculateMeleeDamage(victim, 0, &damageInfo, attType);
-        // Send log damage message to client
-		Unit::DealDamageMods(victim, damageInfo.damage, &damageInfo.absorb);
-        SendAttackStateUpdate(&damageInfo);
+		CalculateMeleeDamage(victim, 0, &_damageInfo[attType], attType);
+		DealDamageMods(victim, _damageInfo[attType].damage, &_damageInfo[attType].absorb);
 
         //TriggerAurasProcOnEvent(damageInfo);
         
-        DealMeleeDamage(&damageInfo, true);
-		ProcDamageAndSpell(damageInfo.target, damageInfo.procAttacker, damageInfo.procVictim, damageInfo.procEx, damageInfo.damage, damageInfo.attackType);
+		// Send log damage message to client
+		SendAttackStateUpdate(&_damageInfo[attType]);
+		
+			        // If this swing is an extra attack, execute it immediately
+			        // Otherwise delay melee hit by melee swing animation time
+			_swingLanded[attType] = false;
+		_delayedTargetGuid[attType] = victim->GetGUID();
+		if (m_extraAttacks)
+			ExecuteDelayedSwingHit(attType, true);
+		else
+			 _swingDelayTimer[attType] = 500;
 
         /*if (GetTypeId() == TYPEID_PLAYER)
             ;//sLog->outStaticDebug("AttackerStateUpdate: (Player) %u attacked %u (TypeId: %u) for %u dmg, absorbed %u, blocked %u, resisted %u.",
@@ -9473,6 +9539,8 @@ void Unit::CombatStop(bool includingCast)
         InterruptNonMeleeSpells(false);
 
     AttackStop();
+	for (uint8 i = BASE_ATTACK; i < RANGED_ATTACK; ++i)
+		 SuspendDelayedSwing(WeaponAttackType(i));
     RemoveAllAttackers();
     if (GetTypeId() == TYPEID_PLAYER)
         ToPlayer()->SendAttackSwingCancelAttack();     // melee and ranged forced attack cancel
@@ -9515,6 +9583,8 @@ void Unit::RemoveAllAttackers()
     while (!m_attackers.empty())
     {
         AttackerSet::iterator iter = m_attackers.begin();
+		for (uint8 i = BASE_ATTACK; i < RANGED_ATTACK; ++i)
+			 (*iter)->SuspendDelayedSwing(WeaponAttackType(i));
         if (!(*iter)->AttackStop())
         {
             sLog->outError("WORLD: Unit has an attacker that isn't attacking it!");

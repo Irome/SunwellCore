@@ -2434,6 +2434,9 @@ class Unit : public WorldObject
         // Movement info
         Movement::MoveSpline * movespline;
 
+		void SuspendDelayedSwing(WeaponAttackType attType);
+		void ExecuteDelayedSwingHit(WeaponAttackType attType, bool extra = false);
+
     protected:
         explicit Unit (bool isWorldObject);
 
@@ -2550,6 +2553,12 @@ class Unit : public WorldObject
         ComboPointHolderSet m_ComboPointHolders;
 
         RedirectThreatInfo _redirectThreatInfo;
+
+		CalcDamageInfo _damageInfo[2];
+		
+		uint64 _delayedTargetGuid[2];
+		uint32 _swingDelayTimer[2];
+		bool _swingLanded[2];
 
         bool m_cleanupDone; // lock made to not add stuff after cleanup before delete
         bool m_duringRemoveFromWorld; // lock made to not add stuff after begining removing from world
